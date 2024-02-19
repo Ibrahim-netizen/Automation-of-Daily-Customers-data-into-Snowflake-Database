@@ -38,32 +38,85 @@ The below demonstrates the structure of the tools and data lifecycle involved in
 1) Creation of Snowflake Objects: 
 After connecting to snowflake, Snowflake objects such as the database to store table and data, virtual warehouse for compute resource, schema to define the database design and its relationship with other tables and data models, and tables to set constraints which are CustomerDB,  CustomerWH, public, and Customers respectively created as shown below:
 
-![image](https://github.com/Ibrahim-netizen/Automation-of-Daily-Customers-data-into-Snowflake-Database/assets/76513466/207669a8-ed68-4c82-b076-1879f45e8de4)
+-- Create Snowflake objects --
+
+-- Delete database CustomerDB if it exists 
+drop database if exists CustomerDB;
+
+-- Create a database named CustomerDB 
+create database CustomerDB;
+
+/* confirm current the database and schema 
+default schema is used for this database */
+
+select current_database(), current_schema(); 
 
 2) Creating the Virtual Warehouse named CustomerWH and table, Customers to store the loaded data into.
 
-![image](https://github.com/Ibrahim-netizen/Automation-of-Daily-Customers-data-into-Snowflake-Database/assets/76513466/14940958-b6ff-42cb-bca0-e01434a7bdd9)
+-- Create a warehouse to provide compute resources to run queries
+
+create or replace warehouse CustomerWH with 
+warehouse_size = 'x-small'
+Auto_suspend = 180
+Auto_resume = True
+Initially_suspended = True;
+
+-- Return the current database we are working on 
+select current_warehouse(); 
+
+-- Delete table CustomerDB if it exists already in the worksheet 
+drop table if exists Customers;
+
+-- Create Customers table to import data into 
+
+create table Customers(
+    Id int primary key,
+    Name varchar(100),
+    Occupation varchar(50),
+    Salary int,
+    sales_flag INTEGER
+);
+
 
 3) The next step is to create a file format to identify CSV files only and staging area named Customer_stage to temporarily store the CSV files: 
 
-![image](https://github.com/Ibrahim-netizen/Automation-of-Daily-Customers-data-into-Snowflake-Database/assets/76513466/0d403a85-dcd3-4b69-8328-2fc0ddbfbd82)
+-- Create file format 
+
+create or replace file format mycsvformat
+Type = 'CSV'
+Field_Delimiter = ','
+Skip_header = 1;
+
+-- Create a staging area to temporarily store CSV file
+
+create or replace stage Customer_stage
+file_format = mycsvformat;
+
 
 4) Data Loading: Loading the CSV file into the staging area with the code below in a local interpreter connected to snowflake (MS Visual Studio)
-![image](https://github.com/Ibrahim-netizen/Automation-of-Daily-Customers-data-into-Snowflake-Database/assets/76513466/e90d1025-59c5-48a7-9bde-d5e2a6f7917b)
+   
+PUT file://C:\Users\giwai\Downloads\Customers.csv @"CUSTOMERDB"."PUBLIC".Customer_stage;
 
 Put command is used to copy data from an external stage such as S3 bucket, Blob storage etc. into a snowflake stage.
 
 5) Creating a Temporary table named Temp_Customers_data and remove duplicates with a Row_Number() windows function:
 
-![image](https://github.com/Ibrahim-netizen/Automation-of-Daily-Customers-data-into-Snowflake-Database/assets/76513466/506224ed-7294-40a6-9c3b-d8986043f0e5)
+-- Create a Temporary Temp_Customers_data table to temporarily store data and remove duplicates
+CREATE OR REPLACE TEMPORARY TABLE Temp_Customers_data AS
+SELECT *, ROW_NUMBER() OVER (PARTITION BY Name ORDER BY ID) AS rn
+FROM @customer_stage/Customers.csv.gz;
 
 6) Data Deduplication:
 
-- Insert the records with row number as 1 such that they do not appear more than once:
+- Insert the records with row number = 1 such that they do not appear more than once:
 
-![image](https://github.com/Ibrahim-netizen/Automation-of-Daily-Customers-data-into-Snowflake-Database/assets/76513466/27c52954-4412-478d-8f35-36dfbe5783f1)
+-- Copy back the non-duplicate records to the original table
+INSERT INTO Customers
+SELECT ID, NAME, OCCUPATION, SALARY, SALES_FLAG 
+FROM Temp_Customers_data
+WHERE Row_Num = 1;
 
-- The below are the duplicate records found in the Temp_Customers_data:
+- The image below displays the duplicate records found in the Temp_Customers_data:
 
 ![image](https://github.com/Ibrahim-netizen/Automation-of-Daily-Customers-data-into-Snowflake-Database/assets/76513466/7732b0e1-854e-4199-9ef6-37cb6e4a2763)
 
@@ -72,13 +125,49 @@ Put command is used to copy data from an external stage such as S3 bucket, Blob 
 
 Here, a task named Customers_load_task is created to automate the daily import of data where the Id does not match existing records in the Customers table, scheduled to run daily at 7am from Monday to Friday using the CRON expression.
 
-![image](https://github.com/Ibrahim-netizen/Automation-of-Daily-Customers-data-into-Snowflake-Database/assets/76513466/4d86deda-9c75-44b4-bfda-13d4993a3588)
+-- Creating a Task to automate the daily incremental loading of data into 
+CREATE TASK IF NOT EXISTS Customers_load_task
+WAREHOUSE = CustomerWH
+SCHEDULE = 'USING CRON 0 7 * * 1-5 GMT' 
+AS
+-- Step 2: Storing Data in a Temporary Table and Removing Duplicates
+CREATE OR REPLACE TEMPORARY TABLE Temp_Customers_data AS
+SELECT ID, Name, Occupation, Salary, Sales_Flag,
+       ROW_NUMBER() OVER (PARTITION BY Name ORDER BY ID) AS rn
+FROM temp_table;
+
+-- Step 3: Inserting Deduplicated Data into Central Customers Table
+MERGE INTO Customers AS target
+USING (SELECT ID, Name, Occupation, Salary, Sales_Flag
+       FROM Temp_Customers_data
+       WHERE rn = 1) AS source
+ON target.ID = source.ID
+WHEN MATCHED THEN
+  UPDATE SET
+    Name = source.Name,
+    Occupation = source.Occupation,
+    Salary = source.Salary,
+    Sales_Flag = source.Sales_Flag
+WHEN NOT MATCHED THEN
+  INSERT (ID, Name, Occupation, Salary, Sales_Flag)
+  VALUES (source.ID, source.Name, source.Occupation, source.Salary, source.Sales_Flag)
+  -- Drop the Temporary Table
+DROP TABLE IF EXISTS Temp_Customers_data;
 
 ##### Managing Created Task
 
 Customers_load_task created to run daily can be managed with the below commands: 
 
-![image](https://github.com/Ibrahim-netizen/Automation-of-Daily-Customers-data-into-Snowflake-Database/assets/76513466/593f2def-a5c7-441c-a2c4-5dc3e8063975)
+--View created task
+Show Tasks;
+
+-- To kickoff task
+
+ALTER TASK Customers_load_task RESUME;
+
+-- To end the task
+ALTER TASK Customers_load_task SUSPEND;
+
 
 
 
