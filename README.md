@@ -91,6 +91,12 @@ Customers_load_task created to run daily can be managed with the below commands:
 ![image](https://github.com/Ibrahim-netizen/Automation-of-Daily-Customers-data-into-Snowflake-Database/assets/76513466/499550e9-b400-4e67-8859-57eb7e663789)
 
 
+### Conclusion
+
+
+This project demonstrates the ability of Snowflake to store incremental data loads as well as provide resources to store and query Big data. It also serve as solution for daily incremental loading task for instances where data is required to be collated into a central table daily for future use and ensure the database is kept up-to-date.
+
+The process can be improved by improving the performance of the warehouse for when the data in the imported CSV file is large. Use copy command in task created for bulk loading of CSV files.
 
 
 
