@@ -1,1 +1,115 @@
+-- 1. Create Snowflake objects --
+
+-- Delete database CustomerDB if it exists 
+drop database if exists CustomerDB;
+
+-- Create a database named CustomerDB 
+create database CustomerDB;
+
+/* confirm current the database and schema 
+default schema is used for this database */
+
+select current_database(), current_schema(); 
+
+-- Create a warehouse to provide compute resources to run queries
+
+create or replace warehouse CustomerWH with 
+warehouse_size = 'x-small'
+Auto_suspend = 180
+Auto_resume = True
+Initially_suspended = True;
+
+-- Return the current database we are working on 
+select current_warehouse(); 
+
+-- Delete table CustomerDB if it exists already in the worksheet 
+drop table if exists Customers;
+
+-- Create Customers table to import data into 
+
+create table "Customers"(
+    Id int primary key,
+    Name varchar(100),
+    Occupation varchar(50),
+    Salary int,
+    sales_flag INTEGER
+);
+
+select * from "CUSTOMERS";
+
+-- 2. Create file format 
+
+create or replace file format mycsvformat
+Type = 'CSV'
+Field_Delimiter = ','
+Skip_header = 1;
+
+-- 3. Create a staging area to temporarily store CSV file
+
+create or replace stage Customer_stage
+file_format = mycsvformat;
+
+drop stage Customer_stage;
+drop warehouse customerwh;
+
+/* 4. Load data into the stage file. Ran PUT file://C:\Users\giwai\Downloads\Customers.csv @"CUSTOMERDB"."PUBLIC".Customer_stage; 
+code in the local application e.g. SNOWSQL etc. 
+which I ran in Visual Studio to stage the CSV file */
+
+PUT file://C:\Users\giwai\Downloads\Customers.csv @"CUSTOMERDB"."PUBLIC".Customer_stage;
+
+-- List available staged files
+list @Customer_stage;
+
+
+-- 5. Create a Temporary Temp_Customers_data table to temporarily store data and remove duplicates
+CREATE OR REPLACE TEMPORARY TABLE Temp_Customers_data AS
+SELECT *, ROW_NUMBER() OVER (PARTITION BY Name ORDER BY ID) AS rn
+FROM @customer_stage/Customers.csv.gz;
+
+-- Creating a Task to automate the daily incremental loading of data into 
+CREATE TASK IF NOT EXISTS Customers_load_task
+WAREHOUSE = CustomerWH
+SCHEDULE = 'USING CRON 0 7 * * 1-5 GMT' 
+AS
+-- Step b: Storing Data in a Temporary Table and Removing Duplicates
+CREATE OR REPLACE TEMPORARY TABLE Temp_Customers_data AS
+SELECT ID, Name, Occupation, Salary, Sales_Flag,
+       ROW_NUMBER() OVER (PARTITION BY Name ORDER BY ID) AS rn
+FROM temp_table;
+
+-- Step c: Inserting Deduplicated Data into Central Customers Table
+MERGE INTO Customers AS target
+USING (SELECT ID, Name, Occupation, Salary, Sales_Flag
+       FROM Temp_Customers_data
+       WHERE rn = 1) AS source
+ON target.ID = source.ID
+WHEN MATCHED THEN
+  UPDATE SET
+    Name = source.Name,
+    Occupation = source.Occupation,
+    Salary = source.Salary,
+    Sales_Flag = source.Sales_Flag
+WHEN NOT MATCHED THEN
+  INSERT (ID, Name, Occupation, Salary, Sales_Flag)
+  VALUES (source.ID, source.Name, source.Occupation, source.Salary, source.Sales_Flag)
+
+-- Drop the Temporary Table
+DROP TABLE IF EXISTS Temp_Customers_data;
+
+-- Drop temp_table
+Drop Table Temp_table
+;
+
+--View created task
+Show Tasks;
+
+-- To kickoff task
+
+ALTER TASK Customers_load_task RESUME;
+
+-- To end the task
+ALTER TASK Customers_load_task SUSPEND;
+
+
 
